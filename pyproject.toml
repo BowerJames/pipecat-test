@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61.0", "setuptools-scm[toml]>=6.2"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pipecat-test"
+version = "0.1.0"
+description = "A test project using pipecat"
+authors = [
+    {name = "James Bower", email = "james@example.com"},
+]
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pipecat-ai[local,silero]>=0.0.90",
+    "python-dotenv>=1.1.1",
+    "websockets>=15.0.1",
+    "jsonpatch>=1.32",
+]
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-mock>=3.13.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
