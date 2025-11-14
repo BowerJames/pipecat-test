@@ -1,9 +1,9 @@
 [build-system]
-requires = ["setuptools>=61.0", "setuptools-scm[toml]>=6.2"]
+requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "pipecat-test"
+name = "pipecat-extension"
 version = "0.1.0"
 description = "A test project using pipecat"
 authors = [
@@ -18,18 +18,16 @@ dependencies = [
     "jsonpatch>=1.32",
 ]
 
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
     "pytest-mock>=3.13.0",
     "black>=23.0.0",
     "ruff>=0.1.0",
+    "pytest-cov>=7.0.0",
 ]
 
-[tool.setuptools.packages.find]
-where = ["src"]
-
 [tool.pytest.ini_options]
-pythonpath = ["."]
-testpaths = ["tests"]
+pythonpath = ["src"]
+testpaths = ["tests", "spec", "dev"]
