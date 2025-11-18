@@ -12,10 +12,11 @@ authors = [
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "pipecat-ai[local,silero]>=0.0.90",
+    "pipecat-ai[local,silero,deepgram,runner,local-smart-turn-v3]>=0.0.90",
     "python-dotenv>=1.1.1",
     "websockets>=15.0.1",
     "jsonpatch>=1.32",
+    "loguru"
 ]
 
 [dependency-groups]
