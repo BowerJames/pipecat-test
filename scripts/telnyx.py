@@ -1,8 +1,14 @@
 from ast import arguments
 import os
+import sys
+from pathlib import Path
+import asyncio
 
 from dotenv import load_dotenv
 from loguru import logger
+
+load_dotenv(override=True)
+
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.frames.frames import LLMRunFrame
@@ -15,6 +21,7 @@ from pipecat.serializers.telnyx import TelnyxFrameSerializer
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.deepgram.tts import DeepgramTTSService
+from deepgram import LiveOptions
 from pipecat.transports.base_transport import BaseTransport
 from pipecat.transports.websocket.fastapi import (
     FastAPIWebsocketParams,
@@ -26,14 +33,55 @@ from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.services.llm_service import FunctionCallParams
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
+import pipecat.audio.turn.smart_turn.base_smart_turn as base_smart_turn_module
+base_smart_turn_module.USE_ONLY_LAST_VAD_SEGMENT = False
 from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
-from loguru import logger
+from pipecat.services.whisper.stt import WhisperSTTServiceMLX, MLXModel, Language
+from pipecat.transports.base_input import InputAudioRawFrame, VADState, EndOfTurnState, BaseInputTransport
 
+async def my_run_turn_analyzer(
+        self, frame: InputAudioRawFrame, vad_state: VADState, previous_vad_state: VADState
+    ):
+        """Run turn analysis on audio frame and handle results."""
+        is_speech = vad_state == VADState.SPEAKING or vad_state == VADState.STARTING
+        # If silence exceeds threshold, we are going to receive EndOfTurnState.COMPLETE
+        end_of_turn_state = self._params.turn_analyzer.append_audio(frame.audio, is_speech)
+        if end_of_turn_state == EndOfTurnState.COMPLETE:
+            await self._handle_end_of_turn_complete(end_of_turn_state)
+        # Otherwise we are going to trigger to check if the turn is completed based on the VAD
+        elif vad_state == VADState.QUIET and vad_state != previous_vad_state:
+            await self._handle_end_of_turn()
+        elif self.awaiting_end_of_turn and (self.frame_count + 1) % 10 == 0:
+            await self._handle_end_of_turn()
+        elif self.awaiting_end_of_turn and (self.frame_count + 1) % 10 != 0:
+            self.frame_count += 1
 
-load_dotenv(override=True)
-
+async def my_handle_end_of_turn_complete(self, state: EndOfTurnState):
+        """Handle completion of end-of-turn analysis."""
+        audio_buffer_length = len(self._params.turn_analyzer._audio_buffer)
+        print("--------------------------------")
+        print(f"Audio buffer length: {audio_buffer_length}")
+        print("--------------------------------")
+        if state == EndOfTurnState.COMPLETE:
+            await self._handle_user_interruption(VADState.QUIET)
+            self.awaiting_end_of_turn = False
+            self.frame_count = 0
+        else:
+            self.awaiting_end_of_turn = True
+            self.frame_count += 1
+BaseInputTransport._run_turn_analyzer = my_run_turn_analyzer
+BaseInputTransport._handle_end_of_turn_complete = my_handle_end_of_turn_complete
 
 async def run_bot(transport: BaseTransport, handle_sigint: bool):
+    # Configure logger early, before creating analyzers
+    logger.remove()
+    def console_filter(record):
+        # record["name"] is the name where the log call was made
+        names = {"pipecat.audio.turn", "pipecat.audio.vad"}
+        return any(record["name"].startswith(name) for name in names)
+    
+    logger.add(sys.stderr, level="TRACE", filter=console_filter)
+    logger.add(sys.stderr, level="ERROR")
 
     questionnaire = {
         "1.1": {
@@ -126,10 +174,10 @@ async def run_bot(transport: BaseTransport, handle_sigint: bool):
 
     llm = OpenAILLMService(
         api_key=os.getenv("OPENAI_API_KEY"),
-        model="gpt-5.1",
+        model="gpt-5-mini",
         params=OpenAILLMService.InputParams(
             extra={
-                "reasoning_effort": "none"
+                "reasoning_effort": "minimal"
             }
         )
     )
@@ -283,17 +331,22 @@ async def run_bot(transport: BaseTransport, handle_sigint: bool):
     context_aggregator = LLMContextAggregatorPair(context)
 
 
-    stt = DeepgramSTTService(api_key=os.getenv("DEEPGRAM_API_KEY"))
+    stt = WhisperSTTServiceMLX(
+        model=MLXModel.LARGE_V3_TURBO_Q4,  # or MEDIUM, LARGE_V3, etc.
+        language=Language.EN
+    )
 
     tts = DeepgramTTSService(api_key=os.getenv("DEEPGRAM_API_KEY"), voice="aura-2-andromeda-en")
-    
+    input_processor = transport.input()
+    input_processor.awaiting_end_of_turn = False
+    input_processor.frame_count = 0
     pipeline = Pipeline(
         [
-            transport.input(),  # Websocket input from client
+            input_processor,  # Websocket input from client
             stt,
             context_aggregator.user(),
-            llm,  # LLM
-            tts,
+            #llm,  # LLM
+            #tts,
             transport.output(),  # Websocket output to client
             context_aggregator.assistant(),
         ]
@@ -330,6 +383,8 @@ async def run_bot(transport: BaseTransport, handle_sigint: bool):
 async def bot(runner_args: RunnerArguments):
     """Main bot entry point compatible with Pipecat Cloud."""
 
+    
+
     _, call_data = await parse_telephony_websocket(runner_args.websocket)
     from_number = call_data["from"]
 
@@ -337,6 +392,7 @@ async def bot(runner_args: RunnerArguments):
     # With this information, you can make a request to your API to get the user's information
     # and inject that information into your bot's configuration.
     logger.info(f"From number: {from_number}")
+    
 
     serializer = TelnyxFrameSerializer(
         stream_id=call_data["stream_id"],
@@ -352,9 +408,12 @@ async def bot(runner_args: RunnerArguments):
             audio_in_enabled=True,
             audio_out_enabled=True,
             add_wav_header=False,
-            vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=0.2)),
+            vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=0.2, min_volume=0.5)),
             turn_analyzer=LocalSmartTurnAnalyzerV3(
-                params=SmartTurnParams()
+                params=SmartTurnParams(
+                    stop_secs=2,
+                    pre_speech_ms=400,
+                )
             ),
             serializer=serializer,
         ),
@@ -367,5 +426,4 @@ async def bot(runner_args: RunnerArguments):
 
 if __name__ == "__main__":
     from pipecat.runner.run import main
-
     main()
